@@ -872,7 +872,7 @@ blynk_err_t blynk_start(blynk_client_t *c) {
 }
 
 /*
-	Format syntax id derived from Python struct format
+	Format syntax is derived from Python struct format
 	c:		char
 	b:		signed char	integer
 	B:		unsigned char
