@@ -17,6 +17,6 @@ This implementation relies on LwIP loopback feature. This feature is disabled in
     ```
 
 ## How to use
-See an example application
+See an [example application](https://github.com/e-asphyx/esp-blynk-app)
 
 Happy blynking!
