@@ -205,6 +205,8 @@ struct _blynk_private_t {
 	TickType_t ping_deadline;
 	uint8_t rd_buf[BLYNK_MAX_PAYLOAD_LEN];
 	uint8_t wr_buf[BLYNK_MAX_PAYLOAD_LEN];
+	int buf_total;
+	int buf_sent;
 };
 
 struct _blynk_client_t {

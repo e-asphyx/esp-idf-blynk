@@ -76,8 +76,6 @@ blynk_err_t blynk_init(blynk_client_t *c) {
 	memset(c, 0, sizeof(blynk_client_t));
 
 	c->state.state = BLYNK_STATE_STOPPED;
-	c->priv.parse = parse_cmd;
-	c->priv.id = 1;
 
 	if ((c->state.mtx = xSemaphoreCreateMutex()) == 0) {
 		return BLYNK_ERR_MEM;
@@ -90,6 +88,12 @@ blynk_err_t blynk_init(blynk_client_t *c) {
 	if (blynk_socketpair(c->priv.ctl) < 0) {
 		return BLYNK_ERR_ERRNO;
 	}
+
+	int flags = fcntl(c->priv.ctl[0], F_GETFL, 0);
+	fcntl(c->priv.ctl[0], F_SETFL, flags | O_NONBLOCK);
+
+	flags = fcntl(c->priv.ctl[1], F_GETFL, 0);
+	fcntl(c->priv.ctl[1], F_SETFL, flags | O_NONBLOCK);
 
 	c->magic = BLYNK_MAGIC;
 
@@ -229,27 +233,27 @@ static uint16_t get_id(blynk_client_t *c, TickType_t deadline, blynk_response_ha
 	return 0;
 }
 
-static int blynk_serialize(int fd, uint8_t *buf, size_t buf_sz, const blynk_message_t *msg) {
+static size_t blynk_serialize(uint8_t *buf, size_t buf_sz, const blynk_message_t *msg) {
 	buf[0] = msg->command;
 	buf[1] = (msg->id >> 8) & 0xff;
 	buf[2] = msg->id & 0xff;
 	buf[3] = (msg->len >> 8) & 0xff;
 	buf[4] = msg->len & 0xff;
 
-	size_t send_bytes = 5;
+	size_t msg_sz = 5;
 
 	if (msg->len && msg->command != BLYNK_CMD_RESPONSE) {
 		size_t pl_sz = msg->len;
 
-		if (pl_sz > buf_sz - send_bytes) {
-			pl_sz = buf_sz - send_bytes;
+		if (pl_sz > buf_sz - msg_sz) {
+			pl_sz = buf_sz - msg_sz;
 		}
 
-		memcpy(buf + send_bytes, msg->payload, pl_sz);
-		send_bytes += pl_sz;
+		memcpy(buf + msg_sz, msg->payload, pl_sz);
+		msg_sz += pl_sz;
 	}
 
-	return write(fd, buf, send_bytes);
+	return msg_sz;
 }
 
 static blynk_err_t blynk_send_internal(blynk_client_t *c,
@@ -700,9 +704,14 @@ static blynk_err_t blynk_loop(blynk_client_t *c) {
 	int flags = fcntl(fd, F_GETFL, 0);
 	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-	memset(&p->awaiting, 0, sizeof(p->awaiting));
 	set_state(c, BLYNK_STATE_CONNECTED);
+
+	/* reset state */
+	memset(&p->awaiting, 0, sizeof(p->awaiting));
 	xQueueReset(c->priv.ctl_queue);
+	p->parse = parse_cmd;
+	p->id = 1;
+	p->buf_total = 0;
 
 	/* set ping timer */
 	advance_ping(c);
@@ -726,9 +735,12 @@ static blynk_err_t blynk_loop(blynk_client_t *c) {
 		FD_SET(fd, &rdset);
 		FD_SET(p->ctl[0], &rdset);
 
-		bool message_queued = false;
 		blynk_ctl_t ctl;
-		if (xQueueReceive(c->priv.ctl_queue, &ctl, 0)) {
+		if (p->buf_total) {
+			/* partial write happened before */
+			FD_SET(fd, &wrset);
+
+		} else if (xQueueReceive(c->priv.ctl_queue, &ctl, 0)) {
 			if (!ctl.message.id) {
 				/* allocate id */
 				uint16_t id = get_id(c, ctl.deadline, ctl.handler, ctl.data);
@@ -741,8 +753,10 @@ static blynk_err_t blynk_loop(blynk_client_t *c) {
 				ctl.message.id = id;
 			}
 
+			p->buf_total = blynk_serialize(p->wr_buf, sizeof(p->wr_buf), &ctl.message);
+			p->buf_sent = 0;
+
 			FD_SET(fd, &wrset);
-			message_queued = true;
 		}
 
 		TickType_t timeout;
@@ -809,9 +823,9 @@ static blynk_err_t blynk_loop(blynk_client_t *c) {
 			}
 		}
 
-		if (message_queued && FD_ISSET(fd, &wrset)) {
+		if (p->buf_total && FD_ISSET(fd, &wrset)) {
 			/* Send outbound message */
-			int wr = blynk_serialize(fd, p->wr_buf, sizeof(p->wr_buf), &ctl.message);
+			int wr = write(fd, p->wr_buf + p->buf_sent, p->buf_total - p->buf_sent);
 
 			if (wr < 0) {
 				if (errno != EAGAIN) {
@@ -819,7 +833,10 @@ static blynk_err_t blynk_loop(blynk_client_t *c) {
 					goto fail_1;
 				}
 			} else {
-				message_queued = false;
+				p->buf_sent += wr;
+				if (p->buf_sent >= p->buf_total) {
+					p->buf_total = 0;
+				}
 			}
 		}
 	}
