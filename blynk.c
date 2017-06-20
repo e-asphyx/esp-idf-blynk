@@ -545,6 +545,11 @@ static void ping_cb(blynk_client_t *c, uint16_t status, void *data) {
 	}
 }
 
+static inline bool timerExpired(TickType_t deadline, TickType_t now) {
+	/* Avoid direct comparison of unsigned numbers */
+	return (int32_t)((uint32_t)deadline - (uint32_t)now) <= 0;
+}
+
 static bool get_select_timeout(blynk_client_t *c, TickType_t *timeout) {
 	/* find time until next event */
 	blynk_private_t *p = &c->priv;
@@ -558,7 +563,7 @@ static bool get_select_timeout(blynk_client_t *c, TickType_t *timeout) {
 			continue;
 		}
 
-		if (p->awaiting[i].deadline <= now) {
+		if (timerExpired(p->awaiting[i].deadline, now)) {
 			/* deadline already expired, so zero timeout */
 			*timeout = 0;
 			return true;
@@ -572,7 +577,7 @@ static bool get_select_timeout(blynk_client_t *c, TickType_t *timeout) {
 	}
 
 	if (p->ping_deadline) {
-		if (p->ping_deadline <= now) {
+		if (timerExpired(p->ping_deadline, now)) {
 			/* deadline already expired, so zero timeout */
 			*timeout = 0;
 			return true;
@@ -619,7 +624,7 @@ static blynk_err_t handle_timers(blynk_client_t *c) {
 			continue;
 		}
 
-		if (p->awaiting[i].deadline <= now) {
+		if (timerExpired(p->awaiting[i].deadline, now)) {
 			/* deadline expired */
 			if (p->awaiting[i].handler) {
 				p->awaiting[i].handler(c, BLYNK_STATUS_RESPONSE_TIMEOUT, p->awaiting[i].data);
@@ -629,7 +634,7 @@ static blynk_err_t handle_timers(blynk_client_t *c) {
 		}
 	}
 
-	if (p->ping_deadline && p->ping_deadline <= now) {
+	if (p->ping_deadline && timerExpired(p->ping_deadline, now)) {
 		advance_ping(c);
 		return blynk_send_internal(c, BLYNK_CMD_PING, 0, 0, NULL, ping_cb, NULL, 0);
 	}
